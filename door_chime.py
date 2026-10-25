@@ -3,20 +3,22 @@
 Door Chime System for Raspberry Pi
 Plays sound when door opens using reed switch
 
-REED SWITCH OPERATION (Normally Closed - NC):
-- When door is closed: magnet near switch → circuit closed → GPIO LOW → sensor pressed
-- When door opens: magnet away from switch → circuit open → GPIO HIGH (pulled up) → sensor released
+REED SWITCH OPERATION (NC reed switch = contacts closed when NO magnet is near):
+- Gate closed: magnet near switch → contacts open → GPIO HIGH (pull-up) → not pressed
+- Gate opens: magnet moves away → contacts close → GPIO LOW → pressed → chime
 
 Note: If using a normally open (NO) switch, the when_pressed and when_released 
 handlers would need to be swapped.
 """
 
+import os
 import sys
 import time
+import argparse
+import signal
 from datetime import datetime
 from signal import pause
 from pathlib import Path
-from typing import Optional
 from gpiozero import Button
 from pygame import mixer
 
@@ -31,26 +33,29 @@ COOLDOWN = 3                   # Minimum seconds between chimes
 REED_PIN = 17                  # GPIO pin number (BCM)
 MAX_LOG_SIZE_MB = 10           # Max log size before rotation
 CHIME_ON_CLOSE = False         # Chime on door closure
-DEBUG_MODE = False             
+DEBUG_MODE = False
+GATE_OPEN_REMINDER = 120       # Re-chime every N seconds while gate stays open (0 = off)
+
 
 def debug_print(message: str) -> None:
     """Print debug messages if DEBUG_MODE is enabled"""
     if DEBUG_MODE:
         print(f"[DEBUG] {message}")
 
+
 def setup_audio() -> mixer.Sound:
     """Initialize audio system with Path-based error handling"""
     try:
         mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
-        
+
         if not CHIME_SOUND.exists():
             raise FileNotFoundError(f"Sound file '{CHIME_SOUND}' not found")
-        
+
         chime = mixer.Sound(str(CHIME_SOUND))
         chime.set_volume(0.7)
         debug_print(f"Audio initialized: {CHIME_SOUND.name}")
         return chime
-        
+
     except FileNotFoundError as e:
         print(f"ERROR: {e}\nAvailable sound files in {BASE_DIR}:")
         for file in BASE_DIR.glob('*.wav'):
@@ -59,6 +64,7 @@ def setup_audio() -> mixer.Sound:
     except Exception as e:
         print(f"ERROR: Audio initialization failed: {e}")
         sys.exit(1)
+
 
 def rotate_log_if_needed() -> None:
     """Rotate log file using pathlib for clean file management"""
@@ -74,53 +80,68 @@ def rotate_log_if_needed() -> None:
     except Exception as e:
         print(f"WARNING: Log rotation failed: {e}")
 
+
 def log_event(message: str, use_emoji: bool = True) -> None:
-    """Log event using high-performance ASCII stripping"""
+    """Log event using ASCII stripping for cross-platform log compatibility"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = f"[{timestamp}] {message}"
-    
-    # Efficiently strip emojis using encode/decode
+
+    # Strip emojis for the log file using encode/decode
     clean_log = log_entry.encode("ascii", "ignore").decode("ascii")
-    
+
     print(log_entry if use_emoji else clean_log)
     rotate_log_if_needed()
-    
+
     try:
         with open(LOG_FILE, "a", encoding='utf-8') as f:
             f.write(clean_log + "\n")
     except IOError as e:
         print(f"WARNING: Could not write to log file: {e}")
 
+
 class DoorChime:
     """Main door chime controller managing sensor state and audio"""
-    
+
     def __init__(self, chime_sound: mixer.Sound, cooldown_seconds: float = 3) -> None:
         self.chime = chime_sound
         self.cooldown = cooldown_seconds
         self.last_trigger_time = 0.0
         self.cooldown_message_shown = False
-        
-        # Setup GPIO sensor (Internal pull-up for NC/NO versatility)
-        self.sensor = Button(REED_PIN, pull_up=True, bounce_time=0.05)
+        self._stop_requested = False
+
+        # Setup GPIO sensor (internal pull-up for NC/NO versatility)
+        self.sensor = Button(REED_PIN, pull_up=True, bounce_time=0.05,
+                      hold_time=GATE_OPEN_REMINDER or 1, hold_repeat=True)
         self.sensor.when_released = self._door_closed
         self.sensor.when_pressed = self._door_opened
-        
+        if GATE_OPEN_REMINDER:
+            self.sensor.when_held = self._gate_left_open
+
         debug_print("DoorChime initialized")
 
+    def _gate_left_open(self) -> None:
+        log_event("⚠️ Gate still open")
+        self._play_chime("reminder")
+        
     def _play_chime(self, event_type: str = "open") -> bool:
         current_time = time.time()
         time_since_last = current_time - self.last_trigger_time
-        
+
         if time_since_last < self.cooldown:
             if not self.cooldown_message_shown:
                 print(f"Cooldown active ({self.cooldown - time_since_last:.1f}s left)")
                 self.cooldown_message_shown = True
             return False
-        
+
         self.cooldown_message_shown = False
         self.last_trigger_time = current_time
-        
+
         try:
+            # Stop any overlapping audio caused by gate bounce or rattling
+            if mixer.get_busy():
+                debug_print("Audio channel busy, stopping previous playback.")
+                mixer.stop()
+
             self.chime.play()
             debug_print(f"Chime played for {event_type} event")
             return True
@@ -138,11 +159,19 @@ class DoorChime:
         if CHIME_ON_CLOSE:
             self._play_chime("close")
 
+    def stop(self) -> None:
+        """Gracefully shut down the chime system"""
+        self._stop_requested = True
+        log_event("System stopped", use_emoji=False)
+        self.sensor.close()
+        mixer.quit()
+        print("Cleanup complete. Goodbye!")
+
     def run(self) -> None:
         """Start the door chime system with helpful status display"""
-        state = "Closed" if self.sensor.is_pressed else "Open"
+        state = "Open" if self.sensor.is_pressed else "Closed"
         log_event(f"System started - Door initially {state}", use_emoji=False)
-        
+
         print("\n" + "="*40)
         print("DOOR CHIME SYSTEM ACTIVE")
         print("="*40)
@@ -150,20 +179,83 @@ class DoorChime:
         print(f"Log: {LOG_FILE.name} | Cooldown: {self.cooldown}s")
         print("Press Ctrl+C to exit")
         print("="*40 + "\n")
-        
+
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
         try:
             pause()
         except KeyboardInterrupt:
             print("\nShutting down...")
-            log_event("System stopped by user", use_emoji=False)
-            self.sensor.close()
-            mixer.quit()
-            print("Cleanup complete. Goodbye!")
+        finally:
+            self.stop()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Raspberry Pi Door Chime System")
+    parser.add_argument('--simulate', action='store_true',
+                        help="Run in simulation mode without hardware GPIO (useful for desktop testing)")
+    parser.add_argument('--debug', action='store_true',
+                        help="Enable verbose debug output")
+    return parser.parse_args()
+
+
+def run_simulator(chime_system: DoorChime) -> None:
+    """Interactive keyboard simulator for testing without hardware"""
+    import threading
+
+    def simulation_loop() -> None:
+        time.sleep(0.5)
+        from gpiozero import Device
+        pin = Device.pin_factory.pin(REED_PIN)
+
+        # Initial state: gate closed (magnet holds contacts open → pulled HIGH)
+        is_closed = True
+        pin.drive_high()
+
+        print("\n" + "-"*40)
+        print("SIMULATOR CONTROLS:")
+        print("  Press 't' + Enter to TOGGLE the door state")
+        print("  Press 'q' + Enter to QUIT")
+        print("-"*40 + "\n")
+
+        while True:
+            cmd = input().strip().lower()
+            if cmd == 'q':
+                # Interrupt the main thread to wake it from pause() and trigger
+                # the KeyboardInterrupt handler in run(), which calls stop()
+                os.kill(os.getpid(), signal.SIGINT)
+                return
+            elif cmd == 't':
+                is_closed = not is_closed
+                if is_closed:
+                    pin.drive_high()  # Magnet near → contacts open → HIGH
+                else:
+                    pin.drive_low()   # Magnet away → contacts close → LOW
+
+    sim_thread = threading.Thread(target=simulation_loop, daemon=True)
+    sim_thread.start()
+
 
 def main() -> None:
+    args = parse_args()
+
+    global DEBUG_MODE
+    if args.debug:
+        DEBUG_MODE = True
+
+    if args.simulate:
+        print("\n[INFO] Starting in SIMULATION MODE. Hardware GPIO bypassed.")
+        from gpiozero import Device
+        from gpiozero.pins.mock import MockFactory
+        Device.pin_factory = MockFactory()
+
     chime_sound = setup_audio()
     chime_system = DoorChime(chime_sound, COOLDOWN)
+
+    if args.simulate:
+        run_simulator(chime_system)
+
     chime_system.run()
+
 
 if __name__ == "__main__":
     main()
