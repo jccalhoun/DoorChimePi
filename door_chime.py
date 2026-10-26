@@ -110,8 +110,11 @@ class DoorChime:
         self._stop_requested = False
 
         # Setup GPIO sensor (internal pull-up for NC/NO versatility)
+                # hold_time stays short so gpiozero's hold thread can shut down quickly;
+        # _gate_left_open() decides when a reminder is actually due
         self.sensor = Button(REED_PIN, pull_up=True, bounce_time=0.05,
-                      hold_time=GATE_OPEN_REMINDER or 1, hold_repeat=True)
+                             hold_time=1, hold_repeat=True)
+        self._next_reminder = GATE_OPEN_REMINDER
         self.sensor.when_released = self._door_closed
         self.sensor.when_pressed = self._door_opened
         if GATE_OPEN_REMINDER:
@@ -120,8 +123,12 @@ class DoorChime:
         debug_print("DoorChime initialized")
 
     def _gate_left_open(self) -> None:
-        log_event("⚠️ Gate still open")
-        self._play_chime("reminder")
+            open_for = self.sensor.active_time
+            if open_for is None or open_for < self._next_reminder:
+                return
+            self._next_reminder += GATE_OPEN_REMINDER
+            log_event("⚠️ Gate still open")
+            self._play_chime("reminder")
         
     def _play_chime(self, event_type: str = "open") -> bool:
         current_time = time.time()
@@ -151,6 +158,7 @@ class DoorChime:
             return False
 
     def _door_opened(self) -> None:
+        self._next_reminder = GATE_OPEN_REMINDER
         log_event("🚪 Door opened", use_emoji=True)
         self._play_chime("open")
 
