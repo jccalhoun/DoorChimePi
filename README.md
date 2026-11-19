@@ -57,7 +57,7 @@ Reed Switch Pin 2 → GND (Pin 6 or any GND pin)
 - Align within 1-2cm when door is closed
 - Test with a handheld magnet before permanent mounting
 
-> **⚠️ Important**: This script is designed for **Normally Closed (NC)** reed switches. If you have a Normally Open (NO) switch, swap the `when_pressed` and `when_released` event handlers in the code.
+> **⚠️ Important**: This script is designed for **Normally Closed (NC)** reed switches. If you have a Normally Open (NO) switch, swap the `when_pressed` and `when_released` event handlers in the code and set GATE_OPEN_REMINDER = 0.
 
 ---
 
@@ -73,8 +73,8 @@ sudo apt install python3-pygame python3-gpiozero
 ### 2. Download the Script
 
 ```bash
-git clone https://github.com/yourusername/raspberry-pi-door-chime.git
-cd raspberry-pi-door-chime
+git clone https://github.com/jccalhoun/DoorChimePi.git
+cd DoorChimePi
 ```
 
 ### 3. Add Your Sound File
@@ -89,7 +89,7 @@ Place a WAV file named `doorbell.wav` in the same directory as the script.
 ### 4. Run the System
 
 ```bash
-python3 door_chime_final.py
+python3 door_chime.py
 ```
 
 Press `Ctrl+C` to stop.
@@ -98,13 +98,14 @@ Press `Ctrl+C` to stop.
 
 ## ⚙️ Configuration
 
-Edit the configuration section at the top of `door_chime_final.py`:
+Edit the configuration section at the top of `door_chime.py`:
 
 ```python
 COOLDOWN = 3                   # Minimum seconds between chimes
 REED_PIN = 17                  # GPIO pin number (BCM)
 MAX_LOG_SIZE_MB = 10           # Max log size before rotation
 CHIME_ON_CLOSE = False         # Set True to also chime when door closes
+GATE_OPEN_REMINDER = 120       # Re-chime every N seconds while gate stays open (0 = off)
 DEBUG_MODE = False             # Set True for verbose debugging
 ```
 
@@ -132,8 +133,9 @@ After=multi-user.target sound.target
 [Service]
 Type=simple
 User=pi
-WorkingDirectory=/home/pi/raspberry-pi-door-chime
-ExecStart=/usr/bin/python3 /home/pi/raspberry-pi-door-chime/door_chime_final.py
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/home/pi/DoorChimePi
+ExecStart=/usr/bin/python3 /home/pi/DoorChimePi/door_chime.py
 Restart=always
 RestartSec=10
 
@@ -180,7 +182,7 @@ sudo systemctl stop doorchime.service
 - **Verify switch type**: Ensure you have a Normally Closed (NC) switch
 - **Check alignment**: Magnet should be within 1-2cm when door is closed
 - **Test with magnet**: Move a handheld magnet near the switch to test
-- **Wrong switch type?** If you have NO instead of NC, swap the event handlers
+- **Wrong switch type?** If you have NO instead of NC, swap the event handlers and set `GATE_OPEN_REMINDER = 0`
 
 ### GPIO Permission Errors
 ```bash
@@ -203,8 +205,8 @@ sudo reboot
 ## 📁 File Structure
 
 ```
-raspberry-pi-door-chime/
-├── door_chime_final.py    # Main script
+DoorChimePi/
+├── door_chime.py          # Main script
 ├── doorbell.wav           # Your sound file (you provide this)
 ├── door_log.txt           # Auto-generated event log
 ├── door_log.txt.old       # Rotated log (when size exceeded)
@@ -217,11 +219,12 @@ raspberry-pi-door-chime/
 
 ### Reed Switch Operation (Normally Closed)
 
-1. **Door Closed**: Magnet near switch → Circuit closed → GPIO LOW → `sensor.is_pressed = True`
-2. **Door Opens**: Magnet moves away → Circuit open → GPIO HIGH (pulled up) → `when_pressed` triggered
+1. **Gate Closed**: Magnet near switch → contacts open → GPIO HIGH (pulled up) → `sensor.is_pressed = False`
+2. **Gate Opens**: Magnet moves away → contacts close → GPIO LOW → `when_pressed` triggered
 3. **Chime Plays**: Sound plays if cooldown period has elapsed
 4. **Event Logged**: Timestamp and event written to `door_log.txt`
-5. **Door Closes**: Magnet returns → Circuit closes → `when_released` triggered
+5. **Gate Left Open**: If it stays open for `GATE_OPEN_REMINDER` seconds, `when_held` re-chimes
+6. **Gate Closes**: Magnet returns → contacts open → `when_released` triggered
 
 ### Cooldown Logic
 
