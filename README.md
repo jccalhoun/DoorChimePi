@@ -20,6 +20,8 @@ The result is a well-tested, production-ready script that follows modern Python 
 - **Real-time Monitoring**: Event-driven GPIO handling via `gpiozero`
 - **Intelligent Audio**: `pygame.mixer` with optimized buffer settings to reduce latency on Raspberry Pi hardware
 - **Configurable Behavior**: Optional chime on door close, adjustable cooldown periods, and debug mode
+- **Gate-Left-Open Reminder**: Re-chimes every `GATE_OPEN_REMINDER` seconds while the gate stays open
+- **Web Page**: Check gate status and recent events, test the chime, and pick a different sound from any device on your network
 
 ### Data Management
 - **Automatic Log Rotation**: Prevents SD card exhaustion by capping log sizes at 10MB (configurable)
@@ -40,7 +42,7 @@ The result is a well-tested, production-ready script that follows modern Python 
 | **Raspberry Pi** | Any model with GPIO (Pi 3, 4, 5, or Zero) |
 | **Reed Switch** | **Normally Closed (NC)** magnetic sensor |
 | **Magnet** | Align within 1–2cm of the switch when door is closed |
-| **Audio** | Speaker via 3.5mm jack, HDMI, or USB audio device |
+| **Audio** | Bluetooth speaker, 3.5mm jack, HDMI, or USB audio device |
 
 ### Wiring Diagram
 
@@ -67,8 +69,10 @@ Reed Switch Pin 2 → GND (Pin 6 or any GND pin)
 
 ```bash
 sudo apt update
-sudo apt install python3-pygame python3-gpiozero
+sudo apt install python3-pygame python3-gpiozero python3-flask
 ```
+
+`python3-flask` is only needed for the web page. Without it the chime still runs and prints a warning.
 
 ### 2. Download the Script
 
@@ -79,7 +83,7 @@ cd DoorChimePi
 
 ### 3. Add Your Sound File
 
-Place a WAV file named `doorbell.wav` in the same directory as the script.
+Place a WAV file named `doorbell.wav` in the same directory as the script. You can add more `.wav` files to the same folder and switch between them from the web page.
 
 **Finding doorbell sounds:**
 - [Freesound.org](https://freesound.org/) - Free sound effects library
@@ -94,6 +98,8 @@ python3 door_chime.py
 
 Press `Ctrl+C` to stop.
 
+To try it on a computer with no GPIO hardware, run `python3 door_chime.py --simulate` and type `t` + Enter to open or close the simulated gate.
+
 ---
 
 ## ⚙️ Configuration
@@ -106,66 +112,97 @@ REED_PIN = 17                  # GPIO pin number (BCM)
 MAX_LOG_SIZE_MB = 10           # Max log size before rotation
 CHIME_ON_CLOSE = False         # Set True to also chime when door closes
 GATE_OPEN_REMINDER = 120       # Re-chime every N seconds while gate stays open (0 = off)
+WEB_PORT = 8080                # Status web page port (0 = off)
+VOLUME = 0.7                   # Chime volume, 0.0 to 1.0
 DEBUG_MODE = False             # Set True for verbose debugging
 ```
 
 ---
 
+## 🌐 Web Page
+
+While the script is running, open `http://<pi-address>:8080` from any phone or computer on the same network. Find the Pi's address with `hostname -I`.
+
+The page shows:
+
+- **Gate status**: open or closed, and when it last opened
+- **Recent events**: the last 20 lines of `door_log.txt`, newest first
+- **Test chime**: plays the current sound
+- **Chime sound**: lists the `.wav` files in the script's folder; choosing one plays it once and saves the choice to `chime_settings.json` so it survives a restart
+
+The page refreshes itself every 15 seconds.
+
+> **⚠️ Note**: The page has no password, so anyone on your network can use it. Do not forward this port through your router.
+
+---
+
 ## 🔄 Deployment: Run on Boot
 
-To ensure the chime runs 24/7, even after power outages or reboots, set it up as a systemd service.
+To have the chime start by itself after a reboot or power outage, with no desktop running, set it up as a systemd **user** service. A user service runs inside your login session, which is where Bluetooth audio lives.
 
-### 1. Create the Service File
+### 1. Boot to the Console with Auto-Login
 
 ```bash
-sudo nano /etc/systemd/system/doorchime.service
+sudo raspi-config
 ```
 
-### 2. Add Configuration
+Choose **System Options → Boot / Auto Login → Console Autologin**. This logs you in at boot without starting a desktop.
 
-Paste the following (adjusting paths for your setup):
+### 2. Set Up the Bluetooth Speaker (skip for wired audio)
+
+Pair and connect the speaker once, then trust it so it reconnects on its own:
+
+```bash
+bluetoothctl trust <speaker MAC address>
+```
+
+### 3. Create the Service File
+
+```bash
+mkdir -p ~/.config/systemd/user
+nano ~/.config/systemd/user/doorchime.service
+```
+
+Paste the following, replacing `YOUR_USER` and the folder with your own:
 
 ```ini
 [Unit]
-Description=Door Chime System
-After=multi-user.target sound.target
+Description=Door Chime
+After=pipewire.service wireplumber.service
 
 [Service]
-Type=simple
-User=pi
 Environment=PYTHONUNBUFFERED=1
-WorkingDirectory=/home/pi/DoorChimePi
-ExecStart=/usr/bin/python3 /home/pi/DoorChimePi/door_chime.py
+WorkingDirectory=/home/YOUR_USER/DoorChimePi
+ExecStart=/usr/bin/python3 /home/YOUR_USER/DoorChimePi/door_chime.py
 Restart=always
 RestartSec=10
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
 ```
 
-### 3. Enable and Start
+### 4. Enable and Start
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable doorchime.service
-sudo systemctl start doorchime.service
+systemctl --user daemon-reload
+systemctl --user enable --now doorchime
 ```
 
-### 4. Verify and Monitor
+### 5. Verify and Monitor
 
 Check status:
 ```bash
-sudo systemctl status doorchime.service
+systemctl --user status doorchime
 ```
 
 View live logs:
 ```bash
-journalctl -u doorchime.service -f
+journalctl --user -u doorchime -f
 ```
 
 Stop the service:
 ```bash
-sudo systemctl stop doorchime.service
+systemctl --user stop doorchime
 ```
 
 ---
@@ -177,6 +214,15 @@ sudo systemctl stop doorchime.service
 - **Test audio output**: `speaker-test -t wav`
 - **Check volume**: Run `alsamixer` and ensure volume is up
 - **Enable debug mode**: Set `DEBUG_MODE = True` in the script
+- **Bluetooth speaker turned itself off**: Many battery speakers power down after 10–20 minutes of silence. Use a mains-powered speaker or one with auto-off disabled
+- **Start of the chime is cut off**: Some Bluetooth speakers take a moment to wake up. Use a `.wav` with a short silent lead-in
+- **Works from a terminal but not at boot**: Check that Console Autologin is on and the speaker is trusted (see Deployment)
+
+### Web Page Won't Load
+- Confirm the address with `hostname -I` and include the port: `http://<pi-address>:8080`
+- Check the logs for a Flask warning: `journalctl --user -u doorchime -n 50`
+- Install Flask if it is missing: `sudo apt install python3-flask`
+- If another program uses port 8080, change `WEB_PORT`
 
 ### Chime Plays at Wrong Time
 - **Verify switch type**: Ensure you have a Normally Closed (NC) switch
@@ -186,14 +232,14 @@ sudo systemctl stop doorchime.service
 
 ### GPIO Permission Errors
 ```bash
-sudo usermod -a -G gpio pi
+sudo usermod -a -G gpio $USER
 sudo reboot
 ```
 
 ### Service Won't Start
 - Check file paths in the service file match your installation
 - Verify Python path: `which python3`
-- Check logs: `journalctl -u doorchime.service -n 50`
+- Check logs: `journalctl --user -u doorchime -n 50`
 
 ### Log File Issues
 - Ensure write permissions in the script directory
@@ -207,7 +253,9 @@ sudo reboot
 ```
 DoorChimePi/
 ├── door_chime.py          # Main script
-├── doorbell.wav           # Your sound file (you provide this)
+├── doorbell.wav           # Default sound file (you provide this)
+├── *.wav                  # Any extra sounds to pick from the web page
+├── chime_settings.json    # Auto-generated: remembers the chosen sound
 ├── door_log.txt           # Auto-generated event log
 ├── door_log.txt.old       # Rotated log (when size exceeded)
 └── README.md              # This file
@@ -249,6 +297,7 @@ When `door_log.txt` exceeds `MAX_LOG_SIZE_MB`:
 - **Language**: Python 3.7+
 - **GPIO Library**: gpiozero (high-level, beginner-friendly)
 - **Audio**: pygame.mixer (reliable, low-latency on Raspberry Pi)
+- **Web Page**: Flask, running in a background thread of the same script
 - **File Handling**: pathlib (modern Python approach)
 - **Type Hints**: Full type annotations for IDE support and type checking
 - **Performance**: Optimized ASCII encoding for log processing
@@ -270,6 +319,8 @@ Before permanent installation:
 3. **Test alignment**: Close door and verify initial state is "Closed"
 4. **Test cooldown**: Open door rapidly multiple times, verify cooldown works
 5. **Test logging**: Check that `door_log.txt` is being created and updated
+6. **Test the web page**: Open `http://<pi-address>:8080`, press **Test chime**, and try switching sounds
+7. **Test a reboot**: Restart the Pi and confirm the chime and web page come back on their own
 
 ---
 
